@@ -9,12 +9,16 @@ Imports System.Windows.Forms
 ' =============================================================================
 Public Class NextOccurrenceResult
     Public Property NextDate As Date
-    Public Property EndDate As Nullable(Of Date)   ' Nothing = cancelled or no duration
+    Public Property EndDate As Nullable(Of Date)
     Public Property Explanation As String
+    Public Property ReportingPeriod As String   ' human-readable period label
+    Public Property RawAnchorDate As Date       ' date BEFORE offset & adjustments
     Public Sub New(ByVal nextDate As Date, ByVal explanation As String)
         Me.NextDate = nextDate
         Me.EndDate = Nothing
         Me.Explanation = explanation
+        Me.ReportingPeriod = ""
+        Me.RawAnchorDate = nextDate
     End Sub
 End Class
 
@@ -247,6 +251,87 @@ Public Class PackageScheduler
         Return adjusted
     End Function
 
+    ' -------------------------------------------------------------------------
+    ' REPORTING PERIOD
+    ' anchorDate = the raw date BEFORE applying any offset (e.g. EOM, BOM, the
+    '              plain occurrence date for Daily/Weekly) and before Fri/Sat/
+    '              Holiday adjustments.
+    ' recurrence = "Daily" | "Weekly" | "Monthly" | "Quarterly" |
+    '              "SemiAnnually" | "Annually"
+    ' parameters = the PARAMETERS field (month groups, day list, etc.)
+    ' -------------------------------------------------------------------------
+    Public Shared Function CalcReportingPeriod(ByVal anchorDate As Date,
+                                               ByVal recurrence As String,
+                                               ByVal parameters As String) As String
+        Select Case recurrence.Trim().ToLower()
+
+            Case "daily"
+                ' e.g.  "28 May 2026"
+                Return anchorDate.ToString("dd MMM yyyy")
+
+            Case "weekly"
+                ' ISO week number
+                Dim weekNum As Integer = System.Globalization.CultureInfo.InvariantCulture.Calendar.GetWeekOfYear(
+                    anchorDate,
+                    System.Globalization.CalendarWeekRule.FirstFourDayWeek,
+                    DayOfWeek.Monday)
+                ' e.g.  "W22-2026  (28 May 2026)"
+                Return "W" & weekNum.ToString() & "-" & anchorDate.Year.ToString() &
+                       "  (" & anchorDate.ToString("dd MMM yyyy") & ")"
+
+            Case "monthly"
+                ' e.g.  "May 2026"
+                Return anchorDate.ToString("MMMM yyyy")
+
+            Case "quarterly"
+                ' Derive quarter from the month group in parameters
+                ' e.g. parameters = "Jan,Apr,Jul,Oct" -> Q1 (Jan-Mar period label based on first month)
+                Dim qNum As Integer = GetQuarterNumber(anchorDate.Month)
+                Dim qLabel As String = GetQuarterMonthRange(qNum)
+                ' e.g.  "Q2 / 2026  (Apr-Jun)"
+                Return "Q" & qNum.ToString() & " / " & anchorDate.Year.ToString() &
+                       "  (" & qLabel & ")"
+
+            Case "semiannually"
+                ' H1 = Jan-Jun, H2 = Jul-Dec
+                Dim half As Integer
+                If anchorDate.Month <= 6 Then
+                    half = 1
+                Else
+                    half = 2
+                End If
+                Dim hLabel As String
+                If half = 1 Then
+                    hLabel = "Jan-Jun"
+                Else
+                    hLabel = "Jul-Dec"
+                End If
+                Return "H" & half.ToString() & " / " & anchorDate.Year.ToString() &
+                       "  (" & hLabel & ")"
+
+            Case "annually"
+                ' e.g.  "2026"
+                Return anchorDate.Year.ToString()
+
+            Case Else
+                Return anchorDate.ToString("dd MMM yyyy")
+        End Select
+    End Function
+
+    Private Shared Function GetQuarterNumber(ByVal month As Integer) As Integer
+        Return CInt(Math.Ceiling(month / 3))
+    End Function
+
+    Private Shared Function GetQuarterMonthRange(ByVal quarter As Integer) As String
+        Select Case quarter
+            Case 1 : Return "Jan-Mar"
+            Case 2 : Return "Apr-Jun"
+            Case 3 : Return "Jul-Sep"
+            Case 4 : Return "Oct-Dec"
+            Case Else : Return ""
+        End Select
+    End Function
+
     Public Shared Function GetNextOccurrence(ByVal fromDate As Date, ByVal p As PackageScheduleParams) As NextOccurrenceResult
         ' Step 1: calculate raw next date
         Dim raw As NextOccurrenceResult
@@ -283,6 +368,8 @@ Public Class PackageScheduler
         End If
 
         Dim finalResult As New NextOccurrenceResult(adjusted.Value, finalExplanation)
+        finalResult.RawAnchorDate = raw.RawAnchorDate
+        finalResult.ReportingPeriod = raw.ReportingPeriod
 
         ' Step 3: calculate end date if duration is set
         If p.Duration > 0 Then
@@ -313,8 +400,11 @@ Public Class PackageScheduler
 
         If isCalendar Then
             Dim nxt As Date = fromDate.AddDays(stepVal)
-            Return New NextOccurrenceResult(nxt,
+            Dim res As New NextOccurrenceResult(nxt,
                 "Daily (Calendar): advanced " & stepVal.ToString() & " day(s) from " & fromDate.ToString("yyyy-MM-dd") & ".")
+            res.RawAnchorDate = nxt
+            res.ReportingPeriod = CalcReportingPeriod(nxt, "Daily", p.Parameters)
+            Return res
         Else
             Dim counted As Integer = 0
             Dim candidate As Date = fromDate
@@ -332,8 +422,11 @@ Public Class PackageScheduler
                 wd = "Fri-only weekend"
             End If
 
-            Return New NextOccurrenceResult(candidate,
+            Dim res2 As New NextOccurrenceResult(candidate,
                 "Daily (Business, " & wd & "): advanced " & stepVal.ToString() & " business day(s) from " & fromDate.ToString("yyyy-MM-dd") & ".")
+            res2.RawAnchorDate = candidate
+            res2.ReportingPeriod = CalcReportingPeriod(candidate, "Daily", p.Parameters)
+            Return res2
         End If
     End Function
 
@@ -360,8 +453,12 @@ Public Class PackageScheduler
         End If
 
         If allowedDays.Count = 0 Then
-            Return New NextOccurrenceResult(fromDate.AddDays(stepVal * 7),
+            Dim nxt As Date = fromDate.AddDays(stepVal * 7)
+            Dim res As New NextOccurrenceResult(nxt,
                 "Weekly: advanced " & stepVal.ToString() & " week(s) from " & fromDate.ToString("yyyy-MM-dd") & ".")
+            res.RawAnchorDate = nxt
+            res.ReportingPeriod = CalcReportingPeriod(nxt, "Weekly", p.Parameters)
+            Return res
         End If
 
         Dim weekStart As Date = StartOfWeek(fromDate.AddDays(1))
@@ -372,8 +469,11 @@ Public Class PackageScheduler
             For Each dow As DayOfWeek In sortedDays
                 Dim dayInWeek As Date = weekStart.AddDays(CInt(dow))
                 If dayInWeek > fromDate Then
-                    Return New NextOccurrenceResult(dayInWeek,
+                    Dim res2 As New NextOccurrenceResult(dayInWeek,
                         "Weekly (every " & stepVal.ToString() & " week(s), days=" & p.Parameters & "): next allowed day after " & fromDate.ToString("yyyy-MM-dd") & ".")
+                    res2.RawAnchorDate = dayInWeek
+                    res2.ReportingPeriod = CalcReportingPeriod(dayInWeek, "Weekly", p.Parameters)
+                    Return res2
                 End If
             Next
             weeksChecked += stepVal
@@ -511,26 +611,66 @@ Public Class PackageScheduler
                                                ByVal context As String, ByVal fromDate As Date) As NextOccurrenceResult
         Dim weekends As DayOfWeek() = GetWeekends(p.TypeOfDayParameters)
         Dim isBusiness As Boolean = (p.TypeOfDay.Trim().ToLower() = "business")
+        Dim rec As String = p.Recurrence.Trim().ToLower()
 
         Select Case p.TypeOfDay.Trim().ToLower()
             Case "dateofday"
                 Dim dayNum As Integer = 1
                 Integer.TryParse(p.TypeOfDayParameters, dayNum)
                 Dim resolved As Date = ClampToMonth(targetMonth.Year, targetMonth.Month, dayNum)
-                Return New NextOccurrenceResult(resolved,
+                ' Raw anchor = the fixed day itself (no offset formula used)
+                Dim res As New NextOccurrenceResult(resolved,
                     context & ": fixed day " & dayNum.ToString() & " of " &
                     targetMonth.ToString("MMMM yyyy") & " -> " & resolved.ToString("yyyy-MM-dd") & ".")
+                res.RawAnchorDate = resolved
+                res.ReportingPeriod = CalcReportingPeriod(resolved, rec, p.Parameters)
+                Return res
 
             Case "locationofday"
                 Dim location As String = p.TypeOfDayParameters.Trim().ToUpper()
+                ' Raw anchor = the BASE point (BOM/MOM/EOM) BEFORE adding the offset
+                Dim rawAnchor As Date = ResolveBaseAnchor(targetMonth, location)
                 Dim resolved As Date = ResolveLocationOfDay(targetMonth, location, isBusiness, weekends)
-                Return New NextOccurrenceResult(resolved,
+                Dim res2 As New NextOccurrenceResult(resolved,
                     context & ": LocationOfDay=" & location & " in " &
                     targetMonth.ToString("MMMM yyyy") & " -> " & resolved.ToString("yyyy-MM-dd") & ".")
+                res2.RawAnchorDate = rawAnchor
+                res2.ReportingPeriod = CalcReportingPeriod(rawAnchor, rec, p.Parameters)
+                Return res2
 
             Case Else
-                Return New NextOccurrenceResult(targetMonth,
+                Dim res3 As New NextOccurrenceResult(targetMonth,
                     context & ": defaulting to 1st of " & targetMonth.ToString("MMMM yyyy") & ".")
+                res3.RawAnchorDate = targetMonth
+                res3.ReportingPeriod = CalcReportingPeriod(targetMonth, rec, p.Parameters)
+                Return res3
+        End Select
+    End Function
+
+    ' Returns the pure BASE anchor (BOM/MOM/EOM) before any +/- offset is applied.
+    ' Used for the reporting period so it reflects the period, not the shifted date.
+    Private Shared Function ResolveBaseAnchor(ByVal targetMonth As Date, ByVal location As String) As Date
+        Dim yr As Integer = targetMonth.Year
+        Dim mo As Integer = targetMonth.Month
+        Dim daysInMonth As Integer = Date.DaysInMonth(yr, mo)
+
+        ' Find the sign position to extract just the base token
+        Dim baseStr As String = location
+        Dim signPos As Integer = -1
+        Dim i As Integer
+        For i = 1 To location.Length - 1
+            If location(i) = "+"c OrElse location(i) = "-"c Then
+                signPos = i
+                Exit For
+            End If
+        Next i
+        If signPos > 0 Then baseStr = location.Substring(0, signPos).ToUpper().Trim()
+
+        Select Case baseStr
+            Case "BOM" : Return New Date(yr, mo, 1)
+            Case "MOM" : Return New Date(yr, mo, CInt(Math.Ceiling(daysInMonth / 2)))
+            Case "EOM" : Return New Date(yr, mo, daysInMonth)
+            Case Else : Return New Date(yr, mo, 1)
         End Select
     End Function
 
@@ -704,6 +844,7 @@ Public Class SchedulerForm
     Private cmbEndHolAdj As ComboBox
     Private lblEndDateCaption As Label
     Private lblEndDate As Label
+    Private lblReportingPeriod As Label
 
     ' Guard flag – prevents event handlers firing before all controls are created
     Private _initialising As Boolean = True
@@ -789,6 +930,36 @@ Public Class SchedulerForm
         lblResultHeading.Location = New Point(16, 16)
         pnlResult.Controls.Add(lblResultHeading)
 
+        ' Reporting Period
+        Dim lblRPCap As New Label
+        lblRPCap.Name = "lblRPCap"
+        lblRPCap.Text = "REPORTING PERIOD"
+        lblRPCap.Font = New Font("Segoe UI", 7, FontStyle.Bold)
+        lblRPCap.ForeColor = clrSubtext
+        lblRPCap.AutoSize = True
+        lblRPCap.Location = New Point(16, 38)
+        lblRPCap.Visible = False
+        pnlResult.Controls.Add(lblRPCap)
+
+        lblReportingPeriod = New Label
+        lblReportingPeriod.Text = ""
+        lblReportingPeriod.Font = New Font("Segoe UI", 10, FontStyle.Bold)
+        lblReportingPeriod.ForeColor = Color.FromArgb(167, 139, 250)   ' soft purple
+        lblReportingPeriod.Size = New Size(250, 36)
+        lblReportingPeriod.AutoSize = False
+        lblReportingPeriod.Location = New Point(14, 54)
+        lblReportingPeriod.Visible = False
+        pnlResult.Controls.Add(lblReportingPeriod)
+
+        ' Separator line after reporting period
+        Dim lblSep0 As New Label
+        lblSep0.Name = "lblSep0"
+        lblSep0.Text = ""
+        lblSep0.BackColor = clrBorder
+        lblSep0.Bounds = New Rectangle(14, 96, 242, 1)
+        lblSep0.Visible = False
+        pnlResult.Controls.Add(lblSep0)
+
         ' Placeholder hint
         Dim lblHint As New Label
         lblHint.Name = "lblHint"
@@ -796,7 +967,7 @@ Public Class SchedulerForm
         lblHint.Font = New Font("Segoe UI", 9)
         lblHint.ForeColor = clrSubtext
         lblHint.AutoSize = True
-        lblHint.Location = New Point(16, 40)
+        lblHint.Location = New Point(16, 38)
         pnlResult.Controls.Add(lblHint)
 
         ' Start date caption + value
@@ -805,7 +976,7 @@ Public Class SchedulerForm
         lblStartCap.Font = New Font("Segoe UI", 8, FontStyle.Bold)
         lblStartCap.ForeColor = clrAccent
         lblStartCap.AutoSize = True
-        lblStartCap.Location = New Point(16, 40)
+        lblStartCap.Location = New Point(16, 106)
         lblStartCap.Visible = False
         pnlResult.Controls.Add(lblStartCap)
 
@@ -815,7 +986,7 @@ Public Class SchedulerForm
         lblResultDate.ForeColor = clrSuccess
         lblResultDate.Size = New Size(250, 60)
         lblResultDate.AutoSize = False
-        lblResultDate.Location = New Point(14, 58)
+        lblResultDate.Location = New Point(14, 122)
         lblResultDate.Visible = False
         pnlResult.Controls.Add(lblResultDate)
 
@@ -824,7 +995,7 @@ Public Class SchedulerForm
         lblDivLine.Name = "lblDivLine"
         lblDivLine.Text = ""
         lblDivLine.BackColor = clrBorder
-        lblDivLine.Bounds = New Rectangle(14, 130, 242, 1)
+        lblDivLine.Bounds = New Rectangle(14, 192, 242, 1)
         lblDivLine.Visible = False
         pnlResult.Controls.Add(lblDivLine)
 
@@ -834,7 +1005,7 @@ Public Class SchedulerForm
         lblEndDateCaption.Font = New Font("Segoe UI", 8, FontStyle.Bold)
         lblEndDateCaption.ForeColor = clrAccent
         lblEndDateCaption.AutoSize = True
-        lblEndDateCaption.Location = New Point(16, 140)
+        lblEndDateCaption.Location = New Point(16, 202)
         lblEndDateCaption.Visible = False
         pnlResult.Controls.Add(lblEndDateCaption)
 
@@ -844,7 +1015,7 @@ Public Class SchedulerForm
         lblEndDate.ForeColor = Color.FromArgb(251, 191, 36)
         lblEndDate.Size = New Size(250, 60)
         lblEndDate.AutoSize = False
-        lblEndDate.Location = New Point(14, 158)
+        lblEndDate.Location = New Point(14, 218)
         lblEndDate.Visible = False
         pnlResult.Controls.Add(lblEndDate)
 
@@ -855,7 +1026,7 @@ Public Class SchedulerForm
         lblExplCap.Font = New Font("Segoe UI", 7, FontStyle.Bold)
         lblExplCap.ForeColor = clrSubtext
         lblExplCap.AutoSize = True
-        lblExplCap.Location = New Point(16, 230)
+        lblExplCap.Location = New Point(16, 290)
         lblExplCap.Visible = False
         pnlResult.Controls.Add(lblExplCap)
 
@@ -863,8 +1034,8 @@ Public Class SchedulerForm
         lblExplanationText.Text = ""
         lblExplanationText.Font = New Font("Consolas", 7)
         lblExplanationText.ForeColor = clrSubtext
-        lblExplanationText.Location = New Point(14, 248)
-        lblExplanationText.Size = New Size(248, 500)
+        lblExplanationText.Location = New Point(14, 308)
+        lblExplanationText.Size = New Size(248, 450)
         lblExplanationText.AutoSize = False
         pnlResult.Controls.Add(lblExplanationText)
 
@@ -1434,20 +1605,26 @@ Public Class SchedulerForm
 
             Dim result As NextOccurrenceResult = PackageScheduler.GetNextOccurrence(dtpFromDate.Value.Date, p)
 
-            ' Hide placeholder hint, show result controls
+            ' Show all result controls, hide the placeholder hint
             For Each ctrl As Control In pnlResult.Controls
-                If ctrl.Name = "lblHint" Then ctrl.Visible = False
-                If ctrl.Name = "lblExplCap" Then ctrl.Visible = True
+                Select Case ctrl.Name
+                    Case "lblHint"
+                        ctrl.Visible = False
+                    Case "lblRPCap", "lblSep0", "lblDivLine", "lblExplCap"
+                        ctrl.Visible = True
+                End Select
+                ' Show the NEXT OCCURRENCE caption (identified by its text)
+                If TypeOf ctrl Is Label Then
+                    Dim lbl As Label = DirectCast(ctrl, Label)
+                    If lbl.Text = "NEXT OCCURRENCE" OrElse lbl.Text = "HOW CALCULATED" Then
+                        lbl.Visible = True
+                    End If
+                End If
             Next
 
-            ' Find and show the start caption (3rd label added, Visible=False initially)
-            Dim capIdx As Integer = 0
-            For Each ctrl As Control In pnlResult.Controls
-                If TypeOf ctrl Is Label AndAlso DirectCast(ctrl, Label).Text = "NEXT OCCURRENCE" Then
-                    ctrl.Visible = True
-                End If
-                If ctrl.Name = "lblDivLine" Then ctrl.Visible = True
-            Next
+            ' Reporting period
+            lblReportingPeriod.Visible = True
+            lblReportingPeriod.Text = result.ReportingPeriod
 
             ' Start date
             lblResultDate.Visible = True
