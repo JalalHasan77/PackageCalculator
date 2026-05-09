@@ -727,8 +727,8 @@ Public Class SchedulerForm
 
     Private Sub InitializeComponents()
         Me.Text = "Package Occurrence Scheduler"
-        Me.Size = New Size(636, 900)
-        Me.MinimumSize = New Size(636, 600)
+        Me.Size = New Size(936, 900)
+        Me.MinimumSize = New Size(936, 600)
         Me.StartPosition = FormStartPosition.CenterScreen
         Me.BackColor = clrBackground
         Me.ForeColor = clrText
@@ -736,9 +736,14 @@ Public Class SchedulerForm
         Me.FormBorderStyle = FormBorderStyle.FixedSingle
         Me.MaximizeBox = False
 
-        ' Header
+        ' Constants for the two-column layout
+        Dim leftW As Integer = 616   ' width of left input column
+        Dim rightX As Integer = 646   ' x start of right result column
+        Dim rightW As Integer = 270   ' width of right result column
+
+        ' Header – spans full width
         Dim pnlHeader As New Panel
-        pnlHeader.Bounds = New Rectangle(0, 0, 620, 70)
+        pnlHeader.Bounds = New Rectangle(0, 0, 936, 70)
         pnlHeader.BackColor = clrPanel
         AddHandler pnlHeader.Paint, AddressOf PaintHeaderBorder
 
@@ -759,9 +764,115 @@ Public Class SchedulerForm
         pnlHeader.Controls.Add(lblSubtitle)
         Me.Controls.Add(pnlHeader)
 
-        ' Main input panel
+        ' Vertical divider line between columns
+        Dim pnlDivider As New Panel
+        pnlDivider.Bounds = New Rectangle(636, 84, 2, 800)
+        pnlDivider.BackColor = clrBorder
+        Me.Controls.Add(pnlDivider)
+
+        ' ═══════════════════════════════════════════════════════════════════
+        ' RIGHT COLUMN – Result panel (always visible, full height)
+        ' ═══════════════════════════════════════════════════════════════════
+        pnlResult = New Panel
+        pnlResult.Bounds = New Rectangle(rightX, 84, rightW, 800)
+        pnlResult.BackColor = clrPanel
+        pnlResult.Visible = True
+        AddHandler pnlResult.Paint, AddressOf PaintBorderedPanel
+        Me.Controls.Add(pnlResult)
+
+        ' "RESULT" heading
+        Dim lblResultHeading As New Label
+        lblResultHeading.Text = "RESULT"
+        lblResultHeading.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        lblResultHeading.ForeColor = clrAccent
+        lblResultHeading.AutoSize = True
+        lblResultHeading.Location = New Point(16, 16)
+        pnlResult.Controls.Add(lblResultHeading)
+
+        ' Placeholder hint
+        Dim lblHint As New Label
+        lblHint.Name = "lblHint"
+        lblHint.Text = "Click ""Calculate"" to" & vbCrLf & "see results here."
+        lblHint.Font = New Font("Segoe UI", 9)
+        lblHint.ForeColor = clrSubtext
+        lblHint.AutoSize = True
+        lblHint.Location = New Point(16, 40)
+        pnlResult.Controls.Add(lblHint)
+
+        ' Start date caption + value
+        Dim lblStartCap As New Label
+        lblStartCap.Text = "NEXT OCCURRENCE"
+        lblStartCap.Font = New Font("Segoe UI", 8, FontStyle.Bold)
+        lblStartCap.ForeColor = clrAccent
+        lblStartCap.AutoSize = True
+        lblStartCap.Location = New Point(16, 40)
+        lblStartCap.Visible = False
+        pnlResult.Controls.Add(lblStartCap)
+
+        lblResultDate = New Label
+        lblResultDate.Text = ""
+        lblResultDate.Font = New Font("Segoe UI", 15, FontStyle.Bold)
+        lblResultDate.ForeColor = clrSuccess
+        lblResultDate.Size = New Size(250, 60)
+        lblResultDate.AutoSize = False
+        lblResultDate.Location = New Point(14, 58)
+        lblResultDate.Visible = False
+        pnlResult.Controls.Add(lblResultDate)
+
+        ' Divider line
+        Dim lblDivLine As New Label
+        lblDivLine.Name = "lblDivLine"
+        lblDivLine.Text = ""
+        lblDivLine.BackColor = clrBorder
+        lblDivLine.Bounds = New Rectangle(14, 130, 242, 1)
+        lblDivLine.Visible = False
+        pnlResult.Controls.Add(lblDivLine)
+
+        ' Final date caption + value
+        lblEndDateCaption = New Label
+        lblEndDateCaption.Text = "FINAL DATE"
+        lblEndDateCaption.Font = New Font("Segoe UI", 8, FontStyle.Bold)
+        lblEndDateCaption.ForeColor = clrAccent
+        lblEndDateCaption.AutoSize = True
+        lblEndDateCaption.Location = New Point(16, 140)
+        lblEndDateCaption.Visible = False
+        pnlResult.Controls.Add(lblEndDateCaption)
+
+        lblEndDate = New Label
+        lblEndDate.Text = ""
+        lblEndDate.Font = New Font("Segoe UI", 15, FontStyle.Bold)
+        lblEndDate.ForeColor = Color.FromArgb(251, 191, 36)
+        lblEndDate.Size = New Size(250, 60)
+        lblEndDate.AutoSize = False
+        lblEndDate.Location = New Point(14, 158)
+        lblEndDate.Visible = False
+        pnlResult.Controls.Add(lblEndDate)
+
+        ' Explanation caption + text
+        Dim lblExplCap As New Label
+        lblExplCap.Name = "lblExplCap"
+        lblExplCap.Text = "HOW CALCULATED"
+        lblExplCap.Font = New Font("Segoe UI", 7, FontStyle.Bold)
+        lblExplCap.ForeColor = clrSubtext
+        lblExplCap.AutoSize = True
+        lblExplCap.Location = New Point(16, 230)
+        lblExplCap.Visible = False
+        pnlResult.Controls.Add(lblExplCap)
+
+        lblExplanationText = New Label
+        lblExplanationText.Text = ""
+        lblExplanationText.Font = New Font("Consolas", 7)
+        lblExplanationText.ForeColor = clrSubtext
+        lblExplanationText.Location = New Point(14, 248)
+        lblExplanationText.Size = New Size(248, 500)
+        lblExplanationText.AutoSize = False
+        pnlResult.Controls.Add(lblExplanationText)
+
+        ' ═══════════════════════════════════════════════════════════════════
+        ' LEFT COLUMN – Main input panel
+        ' ═══════════════════════════════════════════════════════════════════
         Dim pnlMain As New Panel
-        pnlMain.Bounds = New Rectangle(20, 84, 576, 468)
+        pnlMain.Bounds = New Rectangle(20, 84, leftW, 468)
         pnlMain.BackColor = clrPanel
         AddHandler pnlMain.Paint, AddressOf PaintBorderedPanel
         Me.Controls.Add(pnlMain)
@@ -771,7 +882,7 @@ Public Class SchedulerForm
         ' Package ID
         pnlMain.Controls.Add(MakeSectionLabel("PACKAGE ID", 20, y))
         txtPackageId = New TextBox
-        txtPackageId.Bounds = New Rectangle(20, y + 20, 536, 28)
+        txtPackageId.Bounds = New Rectangle(20, y + 20, 576, 28)
         txtPackageId.BackColor = clrInput
         txtPackageId.ForeColor = clrText
         txtPackageId.BorderStyle = BorderStyle.FixedSingle
@@ -822,7 +933,7 @@ Public Class SchedulerForm
 
         ' Weekly day selector: CheckedListBox (Sat → Fri order, business week = Sun-Thu)
         clbWeekDays = New CheckedListBox
-        clbWeekDays.Bounds = New Rectangle(20, y + 20, 536, 110)
+        clbWeekDays.Bounds = New Rectangle(20, y + 20, 576, 110)
         clbWeekDays.BackColor = clrInput
         clbWeekDays.ForeColor = clrText
         clbWeekDays.Font = New Font("Segoe UI", 9)
@@ -919,7 +1030,7 @@ Public Class SchedulerForm
         Dim tabTop As Integer = pnlMain.Top + pnlMain.Height + 10
 
         Dim tabCtrl As New TabControl
-        tabCtrl.Bounds = New Rectangle(20, tabTop, 576, 220)
+        tabCtrl.Bounds = New Rectangle(20, tabTop, 616, 220)
         tabCtrl.Font = New Font("Segoe UI", 9, FontStyle.Bold)
         Me.Controls.Add(tabCtrl)
 
@@ -933,14 +1044,14 @@ Public Class SchedulerForm
         tabStart.Controls.Add(MakeSectionLabel("FRI_ADJUSTMENT", 10, 14))
         tabStart.Controls.Add(MakeSectionLabel("SAT_ADJUSTMENT", 288, 14))
 
-        cmbFriAdj = MakeCombo(10, 32, 265)
+        cmbFriAdj = MakeCombo(10, 32, 278)
         For Each opt As String In PackageScheduler.FriSatOptions
             cmbFriAdj.Items.Add(opt)
         Next
         cmbFriAdj.SelectedIndex = 0
         tabStart.Controls.Add(cmbFriAdj)
 
-        cmbSatAdj = MakeCombo(288, 32, 265)
+        cmbSatAdj = MakeCombo(300, 32, 278)
         For Each opt As String In PackageScheduler.FriSatOptions
             cmbSatAdj.Items.Add(opt)
         Next
@@ -948,7 +1059,7 @@ Public Class SchedulerForm
         tabStart.Controls.Add(cmbSatAdj)
 
         tabStart.Controls.Add(MakeSectionLabel("HOLIDAYS_ADJUSTMENT", 10, 74))
-        cmbHolAdj = MakeCombo(10, 92, 540)
+        cmbHolAdj = MakeCombo(10, 92, 568)
         For Each opt As String In PackageScheduler.HolidayOptions
             cmbHolAdj.Items.Add(opt)
         Next
@@ -983,16 +1094,16 @@ Public Class SchedulerForm
         tabEnd.Controls.Add(lblDurHint)
 
         tabEnd.Controls.Add(MakeSectionLabel("END FRI_ADJUSTMENT", 10, 74))
-        tabEnd.Controls.Add(MakeSectionLabel("END SAT_ADJUSTMENT", 288, 74))
+        tabEnd.Controls.Add(MakeSectionLabel("END SAT_ADJUSTMENT", 300, 74))
 
-        cmbEndFriAdj = MakeCombo(10, 92, 265)
+        cmbEndFriAdj = MakeCombo(10, 92, 278)
         For Each opt As String In PackageScheduler.FriSatOptions
             cmbEndFriAdj.Items.Add(opt)
         Next
         cmbEndFriAdj.SelectedIndex = 0
         tabEnd.Controls.Add(cmbEndFriAdj)
 
-        cmbEndSatAdj = MakeCombo(288, 92, 265)
+        cmbEndSatAdj = MakeCombo(300, 92, 278)
         For Each opt As String In PackageScheduler.FriSatOptions
             cmbEndSatAdj.Items.Add(opt)
         Next
@@ -1000,7 +1111,7 @@ Public Class SchedulerForm
         tabEnd.Controls.Add(cmbEndSatAdj)
 
         tabEnd.Controls.Add(MakeSectionLabel("END HOLIDAYS_ADJUSTMENT", 10, 134))
-        cmbEndHolAdj = MakeCombo(10, 152, 540)
+        cmbEndHolAdj = MakeCombo(10, 152, 568)
         For Each opt As String In PackageScheduler.HolidayOptions
             cmbEndHolAdj.Items.Add(opt)
         Next
@@ -1014,7 +1125,7 @@ Public Class SchedulerForm
 
         btnCalculate = New Button
         btnCalculate.Text = "CALCULATE NEXT OCCURRENCE"
-        btnCalculate.Bounds = New Rectangle(20, btnTop, 576, 46)
+        btnCalculate.Bounds = New Rectangle(20, btnTop, 616, 46)
         btnCalculate.BackColor = clrAccent2
         btnCalculate.ForeColor = Color.White
         btnCalculate.FlatStyle = FlatStyle.Flat
@@ -1024,66 +1135,8 @@ Public Class SchedulerForm
         AddHandler btnCalculate.Click, AddressOf btnCalculate_Click
         Me.Controls.Add(btnCalculate)
 
-        ' ═══════════════════════════════════════════════════════════════════
-        ' RESULT PANEL – directly on form, below button
-        ' ═══════════════════════════════════════════════════════════════════
-        Dim resTop As Integer = btnTop + 56
-
-        pnlResult = New Panel
-        pnlResult.Bounds = New Rectangle(20, resTop, 576, 200)
-        pnlResult.BackColor = clrPanel
-        pnlResult.Visible = False
-        AddHandler pnlResult.Paint, AddressOf PaintBorderedPanel
-        Me.Controls.Add(pnlResult)
-
-        ' Start date
-        Dim lblStartCap As New Label
-        lblStartCap.Text = "NEXT OCCURRENCE  (START DATE)"
-        lblStartCap.Font = New Font("Segoe UI", 8, FontStyle.Bold)
-        lblStartCap.ForeColor = clrAccent
-        lblStartCap.AutoSize = True
-        lblStartCap.Location = New Point(20, 14)
-        pnlResult.Controls.Add(lblStartCap)
-
-        lblResultDate = New Label
-        lblResultDate.Text = ""
-        lblResultDate.Font = New Font("Segoe UI", 20, FontStyle.Bold)
-        lblResultDate.ForeColor = clrSuccess
-        lblResultDate.AutoSize = True
-        lblResultDate.Location = New Point(18, 30)
-        pnlResult.Controls.Add(lblResultDate)
-
-        ' Final date
-        lblEndDateCaption = New Label
-        lblEndDateCaption.Text = "FINAL DATE"
-        lblEndDateCaption.Font = New Font("Segoe UI", 8, FontStyle.Bold)
-        lblEndDateCaption.ForeColor = clrAccent
-        lblEndDateCaption.AutoSize = True
-        lblEndDateCaption.Location = New Point(20, 96)
-        lblEndDateCaption.Visible = False
-        pnlResult.Controls.Add(lblEndDateCaption)
-
-        lblEndDate = New Label
-        lblEndDate.Text = ""
-        lblEndDate.Font = New Font("Segoe UI", 20, FontStyle.Bold)
-        lblEndDate.ForeColor = Color.FromArgb(251, 191, 36)
-        lblEndDate.AutoSize = True
-        lblEndDate.Location = New Point(18, 112)
-        lblEndDate.Visible = False
-        pnlResult.Controls.Add(lblEndDate)
-
-        ' Explanation
-        lblExplanationText = New Label
-        lblExplanationText.Text = ""
-        lblExplanationText.Font = New Font("Consolas", 7.5F)
-        lblExplanationText.ForeColor = clrSubtext
-        lblExplanationText.Location = New Point(18, 168)
-        lblExplanationText.Size = New Size(538, 24)
-        lblExplanationText.AutoSize = False
-        pnlResult.Controls.Add(lblExplanationText)
-
-        ' Auto-size form to fit all content
-        Me.Height = resTop + pnlResult.Height + 50
+        ' Auto-size form height to fit left column content
+        Me.Height = btnTop + 46 + 50
     End Sub
 
     ' -------------------------------------------------------------------------
@@ -1381,31 +1434,47 @@ Public Class SchedulerForm
 
             Dim result As NextOccurrenceResult = PackageScheduler.GetNextOccurrence(dtpFromDate.Value.Date, p)
 
+            ' Hide placeholder hint, show result controls
+            For Each ctrl As Control In pnlResult.Controls
+                If ctrl.Name = "lblHint" Then ctrl.Visible = False
+                If ctrl.Name = "lblExplCap" Then ctrl.Visible = True
+            Next
+
+            ' Find and show the start caption (3rd label added, Visible=False initially)
+            Dim capIdx As Integer = 0
+            For Each ctrl As Control In pnlResult.Controls
+                If TypeOf ctrl Is Label AndAlso DirectCast(ctrl, Label).Text = "NEXT OCCURRENCE" Then
+                    ctrl.Visible = True
+                End If
+                If ctrl.Name = "lblDivLine" Then ctrl.Visible = True
+            Next
+
+            ' Start date
+            lblResultDate.Visible = True
             If result.NextDate = Date.MinValue Then
-                lblResultDate.Text = "EVENT CANCELLED"
+                lblResultDate.Text = "EVENT" & vbCrLf & "CANCELLED"
                 lblResultDate.ForeColor = Color.FromArgb(248, 113, 113)
             Else
                 lblResultDate.Text = result.NextDate.ToString("dd MMM yyyy") &
-                                     "   (" & result.NextDate.DayOfWeek.ToString() & ")"
+                                     vbCrLf & result.NextDate.DayOfWeek.ToString()
                 lblResultDate.ForeColor = Color.FromArgb(52, 211, 153)
             End If
 
+            ' Final date
             If p.Duration > 0 Then
                 lblEndDateCaption.Visible = True
                 lblEndDate.Visible = True
                 If result.EndDate Is Nothing Then
-                    lblEndDate.Text = "END DATE CANCELLED"
+                    lblEndDate.Text = "END DATE" & vbCrLf & "CANCELLED"
                     lblEndDate.ForeColor = Color.FromArgb(248, 113, 113)
                 Else
                     lblEndDate.Text = result.EndDate.Value.ToString("dd MMM yyyy") &
-                                      "   (" & result.EndDate.Value.DayOfWeek.ToString() & ")"
+                                      vbCrLf & result.EndDate.Value.DayOfWeek.ToString()
                     lblEndDate.ForeColor = Color.FromArgb(251, 191, 36)
                 End If
-                pnlResult.Height = 170
             Else
                 lblEndDateCaption.Visible = False
                 lblEndDate.Visible = False
-                pnlResult.Height = 100
             End If
 
             lblExplanationText.Text = result.Explanation
@@ -1421,27 +1490,36 @@ Public Class SchedulerForm
     ' RESIZE HELPER – shrinks/grows pnlMain and slides all controls below it
     ' -------------------------------------------------------------------------
     Private Sub ResizePanelMain(ByVal newHeight As Integer)
-        ' Find pnlMain – it is the first Panel child of the form after the header
         Dim pnlMain As Panel = Nothing
         For Each ctrl As Control In Me.Controls
-            If TypeOf ctrl Is Panel AndAlso ctrl.Top = 84 Then
+            If TypeOf ctrl Is Panel AndAlso ctrl.Top = 84 AndAlso ctrl.Left = 20 Then
                 pnlMain = DirectCast(ctrl, Panel)
                 Exit For
             End If
         Next
-
         If pnlMain Is Nothing Then Exit Sub
         If pnlMain.Height = newHeight Then Exit Sub
 
         Dim delta As Integer = newHeight - pnlMain.Height
         pnlMain.Height = newHeight
 
-        ' Slide every non-header control that sits below pnlMain
+        ' Slide left-column controls below pnlMain
         For Each ctrl As Control In Me.Controls
-            If ctrl.Top > pnlMain.Top Then
+            If ctrl.Top > pnlMain.Top AndAlso ctrl.Left < 640 Then
                 ctrl.Top += delta
             End If
         Next
+
+        ' Resize right panel and divider to match new form height
+        For Each ctrl As Control In Me.Controls
+            If TypeOf ctrl Is Panel AndAlso ctrl.Left >= 636 AndAlso ctrl.Left <= 648 Then
+                ctrl.Height += delta   ' right result panel
+            End If
+            If ctrl.Left = 636 AndAlso ctrl.Width = 2 Then
+                ctrl.Height += delta   ' divider
+            End If
+        Next
+
         Me.Height += delta
     End Sub
 
