@@ -42,6 +42,8 @@ Public Class PackageScheduleParams
     Public Property EndFriAdjustment As String     ' Fri adjustment for end date
     Public Property EndSatAdjustment As String     ' Sat adjustment for end date
     Public Property EndHolidaysAdjustment As String ' Holiday adjustment for end date
+    ' ActiveFrom gate – no occurrence is returned before this date
+    Public Property ActiveFrom As Nullable(Of Date) ' Nothing = no gate applied
 End Class
 
 ' =============================================================================
@@ -333,55 +335,96 @@ Public Class PackageScheduler
     End Function
 
     Public Shared Function GetNextOccurrence(ByVal fromDate As Date, ByVal p As PackageScheduleParams) As NextOccurrenceResult
-        ' Step 1: calculate raw next date
-        Dim raw As NextOccurrenceResult
-        Select Case p.Recurrence.Trim().ToLower()
-            Case "daily"
-                raw = CalcDaily(fromDate, p)
-            Case "weekly"
-                raw = CalcWeekly(fromDate, p)
-            Case "monthly"
-                raw = CalcMonthly(fromDate, p)
-            Case "quarterly"
-                raw = CalcQuarterlyOrSemi(fromDate, p, "Quarterly")
-            Case "semiannually"
-                raw = CalcQuarterlyOrSemi(fromDate, p, "SemiAnnually")
-            Case "annually"
-                raw = CalcAnnually(fromDate, p)
-            Case Else
-                Throw New ArgumentException("Unknown Recurrence: '" & p.Recurrence & "'")
-        End Select
-
-        ' Step 2: apply Fri / Sat / Holiday adjustments
-        Dim adjNote As String = ""
-        Dim adjusted As Nullable(Of Date) = ApplyAdjustments(raw.NextDate, p, adjNote)
-
-        If adjusted Is Nothing Then
-            ' Event cancelled – return a result with a sentinel date and clear explanation
-            Return New NextOccurrenceResult(Date.MinValue,
-                raw.Explanation & " | ADJUSTMENT: " & adjNote)
+        Dim activeFrom As Date = Date.MinValue
+        Dim hasActiveFrom As Boolean = False
+        If p.ActiveFrom IsNot Nothing AndAlso p.ActiveFrom.HasValue Then
+            activeFrom = p.ActiveFrom.Value.Date
+            hasActiveFrom = True
         End If
 
-        Dim finalExplanation As String = raw.Explanation
-        If adjNote <> "" Then
-            finalExplanation &= " | ADJUSTMENT: " & adjNote
+        ' If ActiveFrom gate is set, use the later of fromDate and (ActiveFrom - 1 day)
+        ' so the first candidate we test is >= ActiveFrom.
+        Dim searchFrom As Date = fromDate
+        If hasActiveFrom AndAlso activeFrom > fromDate.AddDays(1) Then
+            searchFrom = activeFrom.AddDays(-1)
         End If
 
-        Dim finalResult As New NextOccurrenceResult(adjusted.Value, finalExplanation)
-        finalResult.RawAnchorDate = raw.RawAnchorDate
-        finalResult.ReportingPeriod = raw.ReportingPeriod
+        Dim maxIterations As Integer = 500   ' safety cap
+        Dim iteration As Integer = 0
+        Dim activeFromNote As String = ""
 
-        ' Step 3: calculate end date if duration is set
-        If p.Duration > 0 Then
-            Dim endNote As String = ""
-            Dim endDate As Nullable(Of Date) = CalcEndDate(adjusted.Value, p, endNote)
-            finalResult.EndDate = endDate
-            If endNote <> "" Then
-                finalResult.Explanation &= " | END DATE: " & endNote
+        Do
+            iteration += 1
+            If iteration > maxIterations Then
+                Throw New InvalidOperationException(
+                    "ActiveFrom: could not find a valid occurrence after " &
+                    activeFrom.ToString("yyyy-MM-dd") & " within " &
+                    maxIterations.ToString() & " attempts.")
             End If
-        End If
 
-        Return finalResult
+            ' Step 1: calculate raw next date from searchFrom
+            Dim raw As NextOccurrenceResult
+            Select Case p.Recurrence.Trim().ToLower()
+                Case "daily"
+                    raw = CalcDaily(searchFrom, p)
+                Case "weekly"
+                    raw = CalcWeekly(searchFrom, p)
+                Case "monthly"
+                    raw = CalcMonthly(searchFrom, p)
+                Case "quarterly"
+                    raw = CalcQuarterlyOrSemi(searchFrom, p, "Quarterly")
+                Case "semiannually"
+                    raw = CalcQuarterlyOrSemi(searchFrom, p, "SemiAnnually")
+                Case "annually"
+                    raw = CalcAnnually(searchFrom, p)
+                Case Else
+                    Throw New ArgumentException("Unknown Recurrence: '" & p.Recurrence & "'")
+            End Select
+
+            ' Step 2: apply Fri / Sat / Holiday adjustments
+            Dim adjNote As String = ""
+            Dim adjusted As Nullable(Of Date) = ApplyAdjustments(raw.NextDate, p, adjNote)
+
+            ' If cancelled by adjustment, propagate immediately
+            If adjusted Is Nothing Then
+                Return New NextOccurrenceResult(Date.MinValue,
+                    raw.Explanation & " | ADJUSTMENT: " & adjNote)
+            End If
+
+            ' Step 3: check ActiveFrom gate
+            If hasActiveFrom AndAlso adjusted.Value < activeFrom Then
+                ' This occurrence is before ActiveFrom – advance searchFrom and retry
+                activeFromNote = "ActiveFrom gate (" & activeFrom.ToString("dd MMM yyyy") &
+                                 "): skipped " & adjusted.Value.ToString("dd MMM yyyy") & ". "
+                searchFrom = raw.NextDate   ' advance by one raw period
+                Continue Do
+            End If
+
+            ' Valid occurrence found – assemble result
+            Dim finalExplanation As String = raw.Explanation
+            If activeFromNote <> "" Then
+                finalExplanation = activeFromNote & finalExplanation
+            End If
+            If adjNote <> "" Then
+                finalExplanation &= " | ADJUSTMENT: " & adjNote
+            End If
+
+            Dim finalResult As New NextOccurrenceResult(adjusted.Value, finalExplanation)
+            finalResult.RawAnchorDate = raw.RawAnchorDate
+            finalResult.ReportingPeriod = raw.ReportingPeriod
+
+            ' Step 4: calculate end date if duration is set
+            If p.Duration > 0 Then
+                Dim endNote As String = ""
+                Dim endDate As Nullable(Of Date) = CalcEndDate(adjusted.Value, p, endNote)
+                finalResult.EndDate = endDate
+                If endNote <> "" Then
+                    finalResult.Explanation &= " | END DATE: " & endNote
+                End If
+            End If
+
+            Return finalResult
+        Loop
     End Function
 
     ' -------------------------------------------------------------------------
@@ -827,6 +870,8 @@ Public Class SchedulerForm
     Private nudAlteration As NumericUpDown
     Private lblParameters As Label
     Private lblTypeOfDayParams As Label
+    Private dtpActiveFrom As DateTimePicker
+    Private chkActiveFrom As CheckBox
     Private cmbLocBase As ComboBox
     Private cmbLocSign As ComboBox
     Private nudLocOffset As NumericUpDown
@@ -1043,7 +1088,7 @@ Public Class SchedulerForm
         ' LEFT COLUMN – Main input panel
         ' ═══════════════════════════════════════════════════════════════════
         Dim pnlMain As New Panel
-        pnlMain.Bounds = New Rectangle(20, 84, leftW, 468)
+        pnlMain.Bounds = New Rectangle(20, 84, leftW, 532)
         pnlMain.BackColor = clrPanel
         AddHandler pnlMain.Paint, AddressOf PaintBorderedPanel
         Me.Controls.Add(pnlMain)
@@ -1083,6 +1128,37 @@ Public Class SchedulerForm
         nudAlteration.BorderStyle = BorderStyle.FixedSingle
         nudAlteration.Font = New Font("Segoe UI", 9)
         pnlMain.Controls.Add(nudAlteration)
+        y += 64
+
+        ' ActiveFrom row
+        chkActiveFrom = New CheckBox
+        chkActiveFrom.Text = "ACTIVE FROM  (no result before this date)"
+        chkActiveFrom.Font = New Font("Segoe UI", 7.5F, FontStyle.Bold)
+        chkActiveFrom.ForeColor = clrSubtext
+        chkActiveFrom.BackColor = Color.Transparent
+        chkActiveFrom.AutoSize = True
+        chkActiveFrom.Location = New Point(20, y)
+        chkActiveFrom.Checked = False
+        AddHandler chkActiveFrom.CheckedChanged, AddressOf chkActiveFrom_CheckedChanged
+        pnlMain.Controls.Add(chkActiveFrom)
+
+        dtpActiveFrom = New DateTimePicker
+        dtpActiveFrom.Bounds = New Rectangle(20, y + 20, 270, 28)
+        dtpActiveFrom.Format = DateTimePickerFormat.Short
+        dtpActiveFrom.Value = Date.Today
+        dtpActiveFrom.CalendarMonthBackground = clrPanel
+        dtpActiveFrom.CalendarForeColor = clrText
+        dtpActiveFrom.Enabled = False
+        dtpActiveFrom.BackColor = clrInput
+        pnlMain.Controls.Add(dtpActiveFrom)
+
+        Dim lblActiveFromHint As New Label
+        lblActiveFromHint.Text = "Tick to enforce a minimum start date for occurrences"
+        lblActiveFromHint.Font = New Font("Segoe UI", 8)
+        lblActiveFromHint.ForeColor = clrSubtext
+        lblActiveFromHint.AutoSize = True
+        lblActiveFromHint.Location = New Point(300, y + 26)
+        pnlMain.Controls.Add(lblActiveFromHint)
         y += 64
 
         ' Recurrence
@@ -1334,21 +1410,21 @@ Public Class SchedulerForm
                 lblWeekDaysHint.Visible = True
                 UpdateWeekDaysHint()
                 ' clbWeekDays (h=110) + hint (~16) replaces combo (h=28): adds 82px extra
-                ResizePanelMain(550)
+                ResizePanelMain(614)
             Case "Quarterly"
                 lblParameters.Text = "PARAMETERS  (quarter group)"
                 cmbParameters.Items.AddRange(New Object() {
                     "Jan,Apr,Jul,Oct", "Feb,May,Aug,Nov", "Mar,Jun,Sep,Dec"})
                 cmbParameters.Enabled = True
                 cmbParameters.SelectedIndex = 0
-                ResizePanelMain(468)
+                ResizePanelMain(532)
             Case "SemiAnnually"
                 lblParameters.Text = "PARAMETERS  (semi-annual pair)"
                 cmbParameters.Items.AddRange(New Object() {
                     "Jan,Jul", "Feb,Aug", "Mar,Sep", "Apr,Oct", "May,Nov", "Jun,Dec"})
                 cmbParameters.Enabled = True
                 cmbParameters.SelectedIndex = 0
-                ResizePanelMain(468)
+                ResizePanelMain(532)
             Case "Annually"
                 lblParameters.Text = "PARAMETERS  (month)"
                 cmbParameters.Items.AddRange(New Object() {
@@ -1356,11 +1432,11 @@ Public Class SchedulerForm
                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"})
                 cmbParameters.Enabled = True
                 cmbParameters.SelectedIndex = 0
-                ResizePanelMain(468)
+                ResizePanelMain(532)
             Case Else
                 lblParameters.Text = "PARAMETERS  (not applicable)"
                 cmbParameters.Enabled = False
-                ResizePanelMain(468)
+                ResizePanelMain(532)
         End Select
 
         cmbTypeOfDay.Items.Clear()
@@ -1507,6 +1583,11 @@ Public Class SchedulerForm
         pnlResult.Visible = False
     End Sub
 
+    Private Sub chkActiveFrom_CheckedChanged(ByVal sender As Object, ByVal e As EventArgs)
+        dtpActiveFrom.Enabled = chkActiveFrom.Checked
+        dtpActiveFrom.BackColor = If(chkActiveFrom.Checked, clrInput, clrBackground)
+    End Sub
+
     Private Sub cmbTypeOfDay_SelectedIndexChanged(ByVal sender As Object, ByVal e As EventArgs)
         If _initialising Then Exit Sub
         UpdateTypeOfDayParams()
@@ -1580,6 +1661,13 @@ Public Class SchedulerForm
             p.Parameters = paramVal
             p.TypeOfDay = todVal
             p.TypeOfDayParameters = todParamVal
+
+            ' ActiveFrom gate
+            If chkActiveFrom.Checked Then
+                p.ActiveFrom = dtpActiveFrom.Value.Date
+            Else
+                p.ActiveFrom = Nothing
+            End If
 
             If cmbFriAdj.SelectedItem IsNot Nothing Then
                 p.FriAdjustment = cmbFriAdj.SelectedItem.ToString()
