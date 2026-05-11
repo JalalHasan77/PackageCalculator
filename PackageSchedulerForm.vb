@@ -11,15 +11,40 @@ Public Class NextOccurrenceResult
     Public Property NextDate As Date
     Public Property EndDate As Nullable(Of Date)
     Public Property Explanation As String
-    Public Property ReportingPeriod As String   ' human-readable period label
-    Public Property RawAnchorDate As Date       ' date BEFORE offset & adjustments
+    Public Property ReportingPeriod As String
+    Public Property RawAnchorDate As Date
+    Public Property Validity As ValidityCheckResult   ' validity status for this occurrence
     Public Sub New(ByVal nextDate As Date, ByVal explanation As String)
         Me.NextDate = nextDate
         Me.EndDate = Nothing
         Me.Explanation = explanation
         Me.ReportingPeriod = ""
         Me.RawAnchorDate = nextDate
+        Me.Validity = New ValidityCheckResult() With {
+            .IsValid = True,
+            .StatusLabel = "Continuous",
+            .OccurrenceNumber = 0
+        }
     End Sub
+End Class
+
+' =============================================================================
+' VALIDITY MODE
+' =============================================================================
+Public Enum ValidityMode
+    [Continuous] = 0        ' 4 – runs forever
+    OneTimeOnly = 1        ' 1 – exactly one occurrence
+    ForXOccurrences = 2     ' 2 – up to X occurrences
+    DateRange = 3        ' 3 – from X date to Y date
+End Enum
+
+' =============================================================================
+' VALIDITY CHECK RESULT
+' =============================================================================
+Public Class ValidityCheckResult
+    Public Property IsValid As Boolean          ' True = occurrence is within validity window
+    Public Property StatusLabel As String       ' human readable status shown in result panel
+    Public Property OccurrenceNumber As Integer ' which occurrence number this is (1-based)
 End Class
 
 ' =============================================================================
@@ -37,13 +62,18 @@ Public Class PackageScheduleParams
     Public Property FriAdjustment As String
     Public Property SatAdjustment As String
     Public Property HolidaysAdjustment As String
-    ' Duration & end-date adjustment parameters
-    Public Property Duration As Integer            ' 0 = no duration
-    Public Property EndFriAdjustment As String     ' Fri adjustment for end date
-    Public Property EndSatAdjustment As String     ' Sat adjustment for end date
-    Public Property EndHolidaysAdjustment As String ' Holiday adjustment for end date
-    ' ActiveFrom gate – no occurrence is returned before this date
-    Public Property ActiveFrom As Nullable(Of Date) ' Nothing = no gate applied
+    ' Duration & end-date adjustment parameters (per-occurrence span)
+    Public Property Duration As Integer            ' 0 = no per-occurrence duration
+    Public Property EndFriAdjustment As String
+    Public Property EndSatAdjustment As String
+    Public Property EndHolidaysAdjustment As String
+    ' ActiveFrom gate – no occurrence before this date
+    Public Property ActiveFrom As Nullable(Of Date)
+    ' Package validity window
+    Public Property PkgValidityMode As ValidityMode
+    Public Property PkgMaxOccurrences As Integer       ' used by ForXOccurrences
+    Public Property PkgValidFrom As Nullable(Of Date)  ' used by DateRange (can mirror ActiveFrom)
+    Public Property PkgValidTo As Nullable(Of Date)    ' used by DateRange
 End Class
 
 ' =============================================================================
@@ -334,6 +364,123 @@ Public Class PackageScheduler
         End Select
     End Function
 
+    ' -------------------------------------------------------------------------
+    ' VALIDITY CHECK
+    ' Called after the occurrence date is found to decide if it is within the
+    ' package's validity window.
+    ' -------------------------------------------------------------------------
+    Public Shared Function CheckValidity(ByVal occurrenceDate As Date,
+                                         ByVal p As PackageScheduleParams,
+                                         ByVal fromDate As Date) As ValidityCheckResult
+        Dim r As New ValidityCheckResult
+        r.OccurrenceNumber = 0
+
+        Select Case p.PkgValidityMode
+
+            Case ValidityMode.Continuous
+                r.IsValid = True
+                r.StatusLabel = "Continuous"
+
+            Case ValidityMode.OneTimeOnly
+                r.OccurrenceNumber = 1
+                r.IsValid = True
+                r.StatusLabel = "One Time Only – occurrence 1 of 1"
+
+            Case ValidityMode.ForXOccurrences
+                Dim startCount As Date = fromDate
+                If p.ActiveFrom IsNot Nothing AndAlso p.ActiveFrom.HasValue Then
+                    startCount = p.ActiveFrom.Value.Date
+                End If
+                Dim n As Integer = CountOccurrencesBefore(occurrenceDate, startCount, p)
+                r.OccurrenceNumber = n
+                If n <= p.PkgMaxOccurrences Then
+                    r.IsValid = True
+                    r.StatusLabel = "Occurrence " & n.ToString() & " of " & p.PkgMaxOccurrences.ToString()
+                Else
+                    r.IsValid = False
+                    r.StatusLabel = "EXPIRED – max " & p.PkgMaxOccurrences.ToString() & " occurrences reached"
+                End If
+
+            Case ValidityMode.DateRange
+                Dim validFrom As Date = Date.MinValue
+                Dim validTo As Date = Date.MaxValue
+
+                If p.PkgValidFrom IsNot Nothing AndAlso p.PkgValidFrom.HasValue Then
+                    validFrom = p.PkgValidFrom.Value.Date
+                End If
+                If p.PkgValidTo IsNot Nothing AndAlso p.PkgValidTo.HasValue Then
+                    validTo = p.PkgValidTo.Value.Date
+                End If
+
+                If occurrenceDate < validFrom Then
+                    r.IsValid = False
+                    r.StatusLabel = "NOT YET ACTIVE – valid from " & validFrom.ToString("dd MMM yyyy")
+                ElseIf occurrenceDate > validTo Then
+                    r.IsValid = False
+                    r.StatusLabel = "Expired on " & validTo.ToString("dd MMM yyyy")
+                Else
+                    r.IsValid = True
+                    r.StatusLabel = "Active  " & validFrom.ToString("dd MMM yyyy") &
+                                    " → " & validTo.ToString("dd MMM yyyy")
+                End If
+
+        End Select
+
+        Return r
+    End Function
+
+    ' Counts occurrences (including the one on occurrenceDate) starting from countFrom.
+    ' Used by ForXOccurrences to determine sequence number.
+    Private Shared Function CountOccurrencesBefore(ByVal targetDate As Date,
+                                                    ByVal countFrom As Date,
+                                                    ByVal p As PackageScheduleParams) As Integer
+        Dim count As Integer = 0
+        Dim cursor As Date = countFrom.AddDays(-1)
+        Dim maxLoop As Integer = 5000
+
+        Do While count < maxLoop
+            ' Get next raw occurrence from cursor (no ActiveFrom gate to avoid recursion)
+            Dim tempP As New PackageScheduleParams
+            tempP.Recurrence = p.Recurrence
+            tempP.Parameters = p.Parameters
+            tempP.Alteration = p.Alteration
+            tempP.TypeOfDay = p.TypeOfDay
+            tempP.TypeOfDayParameters = p.TypeOfDayParameters
+            tempP.FriAdjustment = p.FriAdjustment
+            tempP.SatAdjustment = p.SatAdjustment
+            tempP.HolidaysAdjustment = p.HolidaysAdjustment
+            ' No ActiveFrom, no validity on tempP to avoid recursion
+            tempP.PkgValidityMode = ValidityMode.Continuous
+
+            Dim raw As NextOccurrenceResult
+            Try
+                Select Case tempP.Recurrence.Trim().ToLower()
+                    Case "daily" : raw = CalcDaily(cursor, tempP)
+                    Case "weekly" : raw = CalcWeekly(cursor, tempP)
+                    Case "monthly" : raw = CalcMonthly(cursor, tempP)
+                    Case "quarterly" : raw = CalcQuarterlyOrSemi(cursor, tempP, "Quarterly")
+                    Case "semiannually" : raw = CalcQuarterlyOrSemi(cursor, tempP, "SemiAnnually")
+                    Case "annually" : raw = CalcAnnually(cursor, tempP)
+                    Case Else : Return count + 1
+                End Select
+            Catch
+                Return count + 1
+            End Try
+
+            Dim adjNote As String = ""
+            Dim adjusted As Nullable(Of Date) = ApplyAdjustments(raw.NextDate, tempP, adjNote)
+            If adjusted Is Nothing Then Return count + 1
+
+            count += 1
+            If adjusted.Value.Date >= targetDate.Date Then
+                Exit Do
+            End If
+            cursor = raw.NextDate
+        Loop
+
+        Return count
+    End Function
+
     Public Shared Function GetNextOccurrence(ByVal fromDate As Date, ByVal p As PackageScheduleParams) As NextOccurrenceResult
         Dim activeFrom As Date = Date.MinValue
         Dim hasActiveFrom As Boolean = False
@@ -413,7 +560,27 @@ Public Class PackageScheduler
             finalResult.RawAnchorDate = raw.RawAnchorDate
             finalResult.ReportingPeriod = raw.ReportingPeriod
 
-            ' Step 4: calculate end date if duration is set
+            ' Step 4: check package validity window
+            Dim validity As ValidityCheckResult = CheckValidity(adjusted.Value, p, fromDate)
+            finalResult.Validity = validity
+
+            ' Universal expiry – if the occurrence is invalid due to ValidTo being exceeded
+            ' (applies to ALL modes), mark result as expired and return immediately.
+            If Not validity.IsValid AndAlso validity.StatusLabel.StartsWith("Expired on") Then
+                finalResult.NextDate = Date.MinValue
+                finalResult.Explanation &= " | VALIDITY: " & validity.StatusLabel
+                Return finalResult
+            End If
+
+            ' For other invalid states (e.g. ForX exceeded, DateRange not-yet-active)
+            ' also stop and return the invalidity message.
+            If Not validity.IsValid Then
+                finalResult.NextDate = Date.MinValue
+                finalResult.Explanation &= " | VALIDITY: " & validity.StatusLabel
+                Return finalResult
+            End If
+
+            ' Step 5: calculate per-occurrence end date if duration span is set
             If p.Duration > 0 Then
                 Dim endNote As String = ""
                 Dim endDate As Nullable(Of Date) = CalcEndDate(adjusted.Value, p, endNote)
@@ -877,6 +1044,8 @@ Public Class SchedulerForm
     Private nudLocOffset As NumericUpDown
     Private lblLocFormula As Label
     Private btnCalculate As Button
+    Private btnSave As Button
+    Private btnLoad As Button
     Private pnlResult As Panel
     Private lblResultDate As Label
     Private lblExplanationText As Label
@@ -890,6 +1059,17 @@ Public Class SchedulerForm
     Private lblEndDateCaption As Label
     Private lblEndDate As Label
     Private lblReportingPeriod As Label
+    ' Validity window controls
+    Private grpValidity As GroupBox
+    Private rbContinuous As RadioButton
+    Private rbOneTime As RadioButton
+    Private rbForX As RadioButton
+    Private rbDateRange As RadioButton
+    Private nudMaxOccurrences As NumericUpDown
+    Private dtpValidFrom As DateTimePicker
+    Private dtpValidTo As DateTimePicker
+    Private chkValidFromEqualsActiveFrom As CheckBox
+    Private lblValidityStatus As Label   ' shown in result panel
 
     ' Guard flag – prevents event handlers firing before all controls are created
     Private _initialising As Boolean = True
@@ -948,6 +1128,33 @@ Public Class SchedulerForm
         lblSubtitle.AutoSize = True
         lblSubtitle.Location = New Point(26, 42)
         pnlHeader.Controls.Add(lblSubtitle)
+
+        ' Save button – top-right of header
+        btnSave = New Button
+        btnSave.Text = "💾  Save"
+        btnSave.Bounds = New Rectangle(716, 18, 100, 34)
+        btnSave.BackColor = Color.FromArgb(15, 118, 110)   ' teal-700
+        btnSave.ForeColor = Color.White
+        btnSave.FlatStyle = FlatStyle.Flat
+        btnSave.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        btnSave.Cursor = Cursors.Hand
+        btnSave.FlatAppearance.BorderSize = 0
+        AddHandler btnSave.Click, AddressOf btnSave_Click
+        pnlHeader.Controls.Add(btnSave)
+
+        ' Load button – next to Save
+        btnLoad = New Button
+        btnLoad.Text = "📂  Load"
+        btnLoad.Bounds = New Rectangle(826, 18, 100, 34)
+        btnLoad.BackColor = Color.FromArgb(67, 56, 202)    ' indigo-700
+        btnLoad.ForeColor = Color.White
+        btnLoad.FlatStyle = FlatStyle.Flat
+        btnLoad.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        btnLoad.Cursor = Cursors.Hand
+        btnLoad.FlatAppearance.BorderSize = 0
+        AddHandler btnLoad.Click, AddressOf btnLoad_Click
+        pnlHeader.Controls.Add(btnLoad)
+
         Me.Controls.Add(pnlHeader)
 
         ' Vertical divider line between columns
@@ -1063,6 +1270,27 @@ Public Class SchedulerForm
         lblEndDate.Location = New Point(14, 218)
         lblEndDate.Visible = False
         pnlResult.Controls.Add(lblEndDate)
+
+        ' Validity status
+        Dim lblValidCap As New Label
+        lblValidCap.Name = "lblValidCap"
+        lblValidCap.Text = "VALIDITY"
+        lblValidCap.Font = New Font("Segoe UI", 7, FontStyle.Bold)
+        lblValidCap.ForeColor = clrSubtext
+        lblValidCap.AutoSize = True
+        lblValidCap.Location = New Point(16, 270)
+        lblValidCap.Visible = False
+        pnlResult.Controls.Add(lblValidCap)
+
+        lblValidityStatus = New Label
+        lblValidityStatus.Text = ""
+        lblValidityStatus.Font = New Font("Segoe UI", 8, FontStyle.Bold)
+        lblValidityStatus.ForeColor = clrSuccess
+        lblValidityStatus.Location = New Point(14, 286)
+        lblValidityStatus.Size = New Size(248, 36)
+        lblValidityStatus.AutoSize = False
+        lblValidityStatus.Visible = False
+        pnlResult.Controls.Add(lblValidityStatus)
 
         ' Explanation caption + text
         Dim lblExplCap As New Label
@@ -1269,12 +1497,152 @@ Public Class SchedulerForm
         y += 64
 
         ' ═══════════════════════════════════════════════════════════════════
+        ' PACKAGE VALIDITY  –  GroupBox placed between pnlMain and TabControl
+        ' ═══════════════════════════════════════════════════════════════════
+        Dim validTop As Integer = pnlMain.Top + pnlMain.Height + 10
+
+        grpValidity = New GroupBox
+        grpValidity.Text = "Package Validity"
+        grpValidity.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        grpValidity.ForeColor = clrAccent
+        grpValidity.BackColor = clrPanel
+        grpValidity.Bounds = New Rectangle(20, validTop, 616, 154)
+        Me.Controls.Add(grpValidity)
+
+        ' ── Row 1 – four radio buttons (y=22) ────────────────────────────
+        rbContinuous = New RadioButton
+        rbContinuous.Text = "Continuous"
+        rbContinuous.Font = New Font("Segoe UI", 9)
+        rbContinuous.ForeColor = clrText
+        rbContinuous.BackColor = Color.Transparent
+        rbContinuous.Location = New Point(12, 22)
+        rbContinuous.AutoSize = True
+        rbContinuous.Checked = True
+        AddHandler rbContinuous.CheckedChanged, AddressOf rbValidity_CheckedChanged
+        grpValidity.Controls.Add(rbContinuous)
+
+        rbOneTime = New RadioButton
+        rbOneTime.Text = "One Time Only"
+        rbOneTime.Font = New Font("Segoe UI", 9)
+        rbOneTime.ForeColor = clrText
+        rbOneTime.BackColor = Color.Transparent
+        rbOneTime.Location = New Point(130, 22)
+        rbOneTime.AutoSize = True
+        AddHandler rbOneTime.CheckedChanged, AddressOf rbValidity_CheckedChanged
+        grpValidity.Controls.Add(rbOneTime)
+
+        rbForX = New RadioButton
+        rbForX.Text = "For X Occurrences"
+        rbForX.Font = New Font("Segoe UI", 9)
+        rbForX.ForeColor = clrText
+        rbForX.BackColor = Color.Transparent
+        rbForX.Location = New Point(270, 22)
+        rbForX.AutoSize = True
+        AddHandler rbForX.CheckedChanged, AddressOf rbValidity_CheckedChanged
+        grpValidity.Controls.Add(rbForX)
+
+        rbDateRange = New RadioButton
+        rbDateRange.Text = "Date Range"
+        rbDateRange.Font = New Font("Segoe UI", 9)
+        rbDateRange.ForeColor = clrText
+        rbDateRange.BackColor = Color.Transparent
+        rbDateRange.Location = New Point(430, 22)
+        rbDateRange.AutoSize = True
+        AddHandler rbDateRange.CheckedChanged, AddressOf rbValidity_CheckedChanged
+        grpValidity.Controls.Add(rbDateRange)
+
+        ' ── Row 2 – conditional controls (y label=50, y picker=64) ───────
+        ' Labels sit above their pickers for clarity
+
+        ' "For X" – label + spinner (col 2, under rbForX)
+        Dim lblXCount As New Label
+        lblXCount.Name = "lblXTimes"
+        lblXCount.Text = "Occurrences"
+        lblXCount.Font = New Font("Segoe UI", 7.5F, FontStyle.Bold)
+        lblXCount.ForeColor = clrSubtext
+        lblXCount.AutoSize = True
+        lblXCount.Location = New Point(270, 50)
+        lblXCount.Visible = False
+        grpValidity.Controls.Add(lblXCount)
+
+        nudMaxOccurrences = New NumericUpDown
+        nudMaxOccurrences.Bounds = New Rectangle(270, 64, 100, 28)
+        nudMaxOccurrences.Minimum = 1
+        nudMaxOccurrences.Maximum = 9999
+        nudMaxOccurrences.Value = 1
+        nudMaxOccurrences.BackColor = clrInput
+        nudMaxOccurrences.ForeColor = clrText
+        nudMaxOccurrences.BorderStyle = BorderStyle.FixedSingle
+        nudMaxOccurrences.Font = New Font("Segoe UI", 9)
+        nudMaxOccurrences.Visible = False
+        grpValidity.Controls.Add(nudMaxOccurrences)
+
+        ' "Date Range" – From label + picker (col 0, under rbContinuous area)
+        Dim lblVFrom As New Label
+        lblVFrom.Name = "lblVFrom"
+        lblVFrom.Text = "Valid From"
+        lblVFrom.Font = New Font("Segoe UI", 7.5F, FontStyle.Bold)
+        lblVFrom.ForeColor = clrSubtext
+        lblVFrom.AutoSize = True
+        lblVFrom.Location = New Point(12, 50)
+        lblVFrom.Visible = False
+        grpValidity.Controls.Add(lblVFrom)
+
+        dtpValidFrom = New DateTimePicker
+        dtpValidFrom.Bounds = New Rectangle(12, 64, 170, 28)
+        dtpValidFrom.Format = DateTimePickerFormat.Short
+        dtpValidFrom.Value = Date.Today
+        dtpValidFrom.Visible = False
+        AddHandler dtpValidFrom.ValueChanged, AddressOf dtpValidFrom_ValueChanged
+        grpValidity.Controls.Add(dtpValidFrom)
+
+        ' "= Active From" checkbox (col 1, beside ValidFrom picker)
+        chkValidFromEqualsActiveFrom = New CheckBox
+        chkValidFromEqualsActiveFrom.Text = "= Active From"
+        chkValidFromEqualsActiveFrom.Font = New Font("Segoe UI", 8)
+        chkValidFromEqualsActiveFrom.ForeColor = clrSubtext
+        chkValidFromEqualsActiveFrom.BackColor = Color.Transparent
+        chkValidFromEqualsActiveFrom.AutoSize = True
+        chkValidFromEqualsActiveFrom.Location = New Point(190, 68)
+        chkValidFromEqualsActiveFrom.Visible = False
+        AddHandler chkValidFromEqualsActiveFrom.CheckedChanged, AddressOf chkValidFromEqualsActiveFrom_CheckedChanged
+        grpValidity.Controls.Add(chkValidFromEqualsActiveFrom)
+
+        ' "Last Date" label + picker (col 3, only visible when DateRange selected)
+        Dim lblVTo As New Label
+        lblVTo.Name = "lblVTo"
+        lblVTo.Text = "Last Date  (expires after)"
+        lblVTo.Font = New Font("Segoe UI", 7.5F, FontStyle.Bold)
+        lblVTo.ForeColor = Color.FromArgb(248, 113, 113)
+        lblVTo.AutoSize = True
+        lblVTo.Location = New Point(430, 50)
+        lblVTo.Visible = False
+        grpValidity.Controls.Add(lblVTo)
+
+        dtpValidTo = New DateTimePicker
+        dtpValidTo.Bounds = New Rectangle(430, 64, 170, 28)
+        dtpValidTo.Format = DateTimePickerFormat.Short
+        dtpValidTo.Value = Date.Today.AddYears(1)
+        dtpValidTo.Visible = False
+        grpValidity.Controls.Add(dtpValidTo)
+
+        ' ── Row 3 – hint label (y=104) ────────────────────────────────────
+        Dim lblValidHint As New Label
+        lblValidHint.Name = "lblValidHint"
+        lblValidHint.Text = "Recurs indefinitely. Expires on Last Date if set."
+        lblValidHint.Font = New Font("Segoe UI", 8)
+        lblValidHint.ForeColor = clrSubtext
+        lblValidHint.AutoSize = True
+        lblValidHint.Location = New Point(12, 106)
+        grpValidity.Controls.Add(lblValidHint)
+
+        ' ═══════════════════════════════════════════════════════════════════
         ' TAB CONTROL  – Tab 1: Starting Date Adjustment
         '               Tab 2: Final Date Adjustment (Duration + End Adj)
         ' Placed directly on the FORM so nothing inside pnlMain can ever
         ' overlap it, and the button is a plain Me.Controls child too.
         ' ═══════════════════════════════════════════════════════════════════
-        Dim tabTop As Integer = pnlMain.Top + pnlMain.Height + 10
+        Dim tabTop As Integer = validTop + grpValidity.Height + 10
 
         Dim tabCtrl As New TabControl
         tabCtrl.Bounds = New Rectangle(20, tabTop, 616, 220)
@@ -1586,6 +1954,73 @@ Public Class SchedulerForm
     Private Sub chkActiveFrom_CheckedChanged(ByVal sender As Object, ByVal e As EventArgs)
         dtpActiveFrom.Enabled = chkActiveFrom.Checked
         dtpActiveFrom.BackColor = If(chkActiveFrom.Checked, clrInput, clrBackground)
+        ' If DateRange mode, also sync ValidFrom when ActiveFrom changes
+        If rbDateRange.Checked AndAlso chkValidFromEqualsActiveFrom.Checked Then
+            dtpValidFrom.Value = dtpActiveFrom.Value
+        End If
+    End Sub
+
+    Private Sub rbValidity_CheckedChanged(ByVal sender As Object, ByVal e As EventArgs)
+        If _initialising Then Exit Sub
+        UpdateValidityControls()
+    End Sub
+
+    Private Sub dtpValidFrom_ValueChanged(ByVal sender As Object, ByVal e As EventArgs)
+        ' If "= Active From" is ticked, keep ActiveFrom in sync
+        If chkValidFromEqualsActiveFrom.Checked Then
+            dtpActiveFrom.Value = dtpValidFrom.Value
+            If Not chkActiveFrom.Checked Then chkActiveFrom.Checked = True
+        End If
+    End Sub
+
+    Private Sub chkValidFromEqualsActiveFrom_CheckedChanged(ByVal sender As Object, ByVal e As EventArgs)
+        If chkValidFromEqualsActiveFrom.Checked Then
+            ' Mirror ActiveFrom → ValidFrom
+            If chkActiveFrom.Checked Then
+                dtpValidFrom.Value = dtpActiveFrom.Value
+            Else
+                dtpValidFrom.Value = Date.Today
+            End If
+            dtpValidFrom.Enabled = False
+        Else
+            dtpValidFrom.Enabled = True
+        End If
+    End Sub
+
+    Private Sub UpdateValidityControls()
+        Dim lblHint As Label = Nothing
+        For Each ctrl As Control In grpValidity.Controls
+            If ctrl.Name = "lblValidHint" Then lblHint = DirectCast(ctrl, Label)
+        Next
+
+        ' "For X" controls
+        nudMaxOccurrences.Visible = rbForX.Checked
+        For Each ctrl As Control In grpValidity.Controls
+            If ctrl.Name = "lblXTimes" Then ctrl.Visible = rbForX.Checked
+        Next
+
+        ' "Date Range" ValidFrom controls (only for DateRange mode)
+        Dim dateRangeVisible As Boolean = rbDateRange.Checked
+        dtpValidFrom.Visible = dateRangeVisible
+        dtpValidTo.Visible = dateRangeVisible
+        chkValidFromEqualsActiveFrom.Visible = dateRangeVisible
+        For Each ctrl As Control In grpValidity.Controls
+            If ctrl.Name = "lblVFrom" OrElse ctrl.Name = "lblVTo" Then
+                ctrl.Visible = dateRangeVisible
+            End If
+        Next
+
+        If lblHint IsNot Nothing Then
+            If rbContinuous.Checked Then
+                lblHint.Text = "Recurs indefinitely. Expires on Last Date if set."
+            ElseIf rbOneTime.Checked Then
+                lblHint.Text = "Calculated once only. Expires on Last Date if set."
+            ElseIf rbForX.Checked Then
+                lblHint.Text = "Valid for X occurrences. Also expires on Last Date if set."
+            ElseIf rbDateRange.Checked Then
+                lblHint.Text = "Valid only between From date and Last Date."
+            End If
+        End If
     End Sub
 
     Private Sub cmbTypeOfDay_SelectedIndexChanged(ByVal sender As Object, ByVal e As EventArgs)
@@ -1669,6 +2104,24 @@ Public Class SchedulerForm
                 p.ActiveFrom = Nothing
             End If
 
+            ' Package validity window
+            If rbOneTime.Checked Then
+                p.PkgValidityMode = ValidityMode.OneTimeOnly
+            ElseIf rbForX.Checked Then
+                p.PkgValidityMode = ValidityMode.ForXOccurrences
+                p.PkgMaxOccurrences = CInt(nudMaxOccurrences.Value)
+            ElseIf rbDateRange.Checked Then
+                p.PkgValidityMode = ValidityMode.DateRange
+                If chkValidFromEqualsActiveFrom.Checked AndAlso chkActiveFrom.Checked Then
+                    p.PkgValidFrom = dtpActiveFrom.Value.Date
+                Else
+                    p.PkgValidFrom = dtpValidFrom.Value.Date
+                End If
+                p.PkgValidTo = dtpValidTo.Value.Date
+            Else
+                p.PkgValidityMode = ValidityMode.Continuous
+            End If
+
             If cmbFriAdj.SelectedItem IsNot Nothing Then
                 p.FriAdjustment = cmbFriAdj.SelectedItem.ToString()
             End If
@@ -1698,10 +2151,9 @@ Public Class SchedulerForm
                 Select Case ctrl.Name
                     Case "lblHint"
                         ctrl.Visible = False
-                    Case "lblRPCap", "lblSep0", "lblDivLine", "lblExplCap"
+                    Case "lblRPCap", "lblSep0", "lblDivLine", "lblExplCap", "lblValidCap"
                         ctrl.Visible = True
                 End Select
-                ' Show the NEXT OCCURRENCE caption (identified by its text)
                 If TypeOf ctrl Is Label Then
                     Dim lbl As Label = DirectCast(ctrl, Label)
                     If lbl.Text = "NEXT OCCURRENCE" OrElse lbl.Text = "HOW CALCULATED" Then
@@ -1714,11 +2166,35 @@ Public Class SchedulerForm
             lblReportingPeriod.Visible = True
             lblReportingPeriod.Text = result.ReportingPeriod
 
-            ' Start date
+            ' Validity status
+            lblValidityStatus.Visible = True
+            If result.Validity IsNot Nothing Then
+                lblValidityStatus.Text = result.Validity.StatusLabel
+                If result.Validity.IsValid Then
+                    lblValidityStatus.ForeColor = clrSuccess
+                Else
+                    lblValidityStatus.ForeColor = Color.FromArgb(248, 113, 113)
+                End If
+            End If
+
+            ' Start date – or Expired message
             lblResultDate.Visible = True
             If result.NextDate = Date.MinValue Then
-                lblResultDate.Text = "EVENT" & vbCrLf & "CANCELLED"
-                lblResultDate.ForeColor = Color.FromArgb(248, 113, 113)
+                ' Check if it's an expiry or a cancellation
+                If result.Validity IsNot Nothing AndAlso
+                   result.Validity.StatusLabel.StartsWith("Expired on") Then
+                    lblResultDate.Text = result.Validity.StatusLabel
+                    lblResultDate.ForeColor = Color.FromArgb(248, 113, 113)
+                ElseIf result.Validity IsNot Nothing AndAlso Not result.Validity.IsValid Then
+                    lblResultDate.Text = result.Validity.StatusLabel
+                    lblResultDate.ForeColor = Color.FromArgb(248, 113, 113)
+                Else
+                    lblResultDate.Text = "EVENT" & vbCrLf & "CANCELLED"
+                    lblResultDate.ForeColor = Color.FromArgb(248, 113, 113)
+                End If
+                ' Hide final date when expired
+                lblEndDateCaption.Visible = False
+                lblEndDate.Visible = False
             Else
                 lblResultDate.Text = result.NextDate.ToString("dd MMM yyyy") &
                                      vbCrLf & result.NextDate.DayOfWeek.ToString()
@@ -1768,7 +2244,7 @@ Public Class SchedulerForm
         Dim delta As Integer = newHeight - pnlMain.Height
         pnlMain.Height = newHeight
 
-        ' Slide left-column controls below pnlMain
+        ' Slide left-column controls below pnlMain (including grpValidity)
         For Each ctrl As Control In Me.Controls
             If ctrl.Top > pnlMain.Top AndAlso ctrl.Left < 640 Then
                 ctrl.Top += delta
@@ -1786,6 +2262,249 @@ Public Class SchedulerForm
         Next
 
         Me.Height += delta
+    End Sub
+
+    ' -------------------------------------------------------------------------
+    ' SAVE  –  writes all form values to a plain key=value text file
+    ' -------------------------------------------------------------------------
+    Private Sub btnSave_Click(ByVal sender As Object, ByVal e As EventArgs)
+        Try
+            Dim dlg As New SaveFileDialog
+            dlg.Title = "Save Schedule Settings"
+            dlg.Filter = "Schedule Files (*.sch)|*.sch|All Files (*.*)|*.*"
+            dlg.DefaultExt = "sch"
+            dlg.FileName = "schedule"
+
+            If dlg.ShowDialog() <> DialogResult.OK Then Exit Sub
+
+            Using sw As New System.IO.StreamWriter(dlg.FileName, False, System.Text.Encoding.UTF8)
+                ' Header
+                sw.WriteLine("# Package Scheduler Settings")
+                sw.WriteLine("# Saved: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))
+                sw.WriteLine()
+
+                ' Core fields
+                sw.WriteLine("PackageId=" & txtPackageId.Text.Trim())
+                sw.WriteLine("FromDate=" & dtpFromDate.Value.ToString("yyyy-MM-dd"))
+                sw.WriteLine("Alteration=" & nudAlteration.Value.ToString())
+                sw.WriteLine("Recurrence=" & SafeCombo(cmbRecurrence))
+
+                ' ActiveFrom
+                sw.WriteLine("ActiveFromEnabled=" & chkActiveFrom.Checked.ToString())
+                sw.WriteLine("ActiveFrom=" & dtpActiveFrom.Value.ToString("yyyy-MM-dd"))
+
+                ' Parameters
+                sw.WriteLine("Parameters=" & SafeCombo(cmbParameters))
+
+                ' Weekly days
+                Dim days As New System.Text.StringBuilder
+                For i As Integer = 0 To clbWeekDays.Items.Count - 1
+                    If clbWeekDays.GetItemChecked(i) Then
+                        If days.Length > 0 Then days.Append("#")
+                        days.Append(clbWeekDays.Items(i).ToString())
+                    End If
+                Next i
+                sw.WriteLine("WeeklyDays=" & days.ToString())
+
+                ' Type of day
+                sw.WriteLine("TypeOfDay=" & SafeCombo(cmbTypeOfDay))
+                sw.WriteLine("TypeOfDayParams=" & SafeCombo(cmbTypeOfDayParams))
+
+                ' Location of day
+                sw.WriteLine("LocBase=" & SafeCombo(cmbLocBase))
+                sw.WriteLine("LocSign=" & SafeCombo(cmbLocSign))
+                sw.WriteLine("LocOffset=" & nudLocOffset.Value.ToString())
+
+                ' Start date adjustments
+                sw.WriteLine("FriAdj=" & SafeCombo(cmbFriAdj))
+                sw.WriteLine("SatAdj=" & SafeCombo(cmbSatAdj))
+                sw.WriteLine("HolAdj=" & SafeCombo(cmbHolAdj))
+
+                ' Duration & end adjustments
+                sw.WriteLine("Duration=" & nudDuration.Value.ToString())
+                sw.WriteLine("EndFriAdj=" & SafeCombo(cmbEndFriAdj))
+                sw.WriteLine("EndSatAdj=" & SafeCombo(cmbEndSatAdj))
+                sw.WriteLine("EndHolAdj=" & SafeCombo(cmbEndHolAdj))
+
+                ' Package validity
+                Dim validMode As String = "Continuous"
+                If rbOneTime.Checked Then validMode = "OneTimeOnly"
+                If rbForX.Checked Then validMode = "ForXOccurrences"
+                If rbDateRange.Checked Then validMode = "DateRange"
+                sw.WriteLine("ValidityMode=" & validMode)
+                sw.WriteLine("MaxOccurrences=" & nudMaxOccurrences.Value.ToString())
+                sw.WriteLine("ValidFrom=" & dtpValidFrom.Value.ToString("yyyy-MM-dd"))
+                sw.WriteLine("ValidTo=" & dtpValidTo.Value.ToString("yyyy-MM-dd"))
+                sw.WriteLine("ValidFromEqualsActiveFrom=" & chkValidFromEqualsActiveFrom.Checked.ToString())
+            End Using
+
+            MessageBox.Show("Settings saved to:" & vbCrLf & dlg.FileName,
+                            "Saved", MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+        Catch ex As Exception
+            MessageBox.Show("Save error: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
+    ' -------------------------------------------------------------------------
+    ' LOAD  –  reads a previously saved key=value file and restores all controls
+    ' -------------------------------------------------------------------------
+    Private Sub btnLoad_Click(ByVal sender As Object, ByVal e As EventArgs)
+        Try
+            Dim dlg As New OpenFileDialog
+            dlg.Title = "Load Schedule Settings"
+            dlg.Filter = "Schedule Files (*.sch)|*.sch|All Files (*.*)|*.*"
+            dlg.DefaultExt = "sch"
+
+            If dlg.ShowDialog() <> DialogResult.OK Then Exit Sub
+
+            ' Parse key=value pairs
+            Dim kv As New Dictionary(Of String, String)
+            For Each line As String In System.IO.File.ReadAllLines(dlg.FileName, System.Text.Encoding.UTF8)
+                If line.StartsWith("#") OrElse line.Trim() = "" Then Continue For
+                Dim eq As Integer = line.IndexOf("="c)
+                If eq < 1 Then Continue For
+                Dim key As String = line.Substring(0, eq).Trim()
+                Dim val As String = line.Substring(eq + 1).Trim()
+                kv(key) = val
+            Next
+
+            ' ── Restore controls ──────────────────────────────────────────
+            _initialising = True   ' suppress cascading events while restoring
+
+            If kv.ContainsKey("PackageId") Then txtPackageId.Text = kv("PackageId")
+
+            If kv.ContainsKey("FromDate") Then
+                Dim d As Date
+                If Date.TryParseExact(kv("FromDate"), "yyyy-MM-dd",
+                    Nothing, Globalization.DateTimeStyles.None, d) Then dtpFromDate.Value = d
+            End If
+
+            If kv.ContainsKey("Alteration") Then
+                Dim a As Integer
+                If Integer.TryParse(kv("Alteration"), a) Then nudAlteration.Value = Math.Max(1, Math.Min(100, a))
+            End If
+
+            SetCombo(cmbRecurrence, kv, "Recurrence")
+
+            If kv.ContainsKey("ActiveFromEnabled") Then
+                chkActiveFrom.Checked = (kv("ActiveFromEnabled").ToLower() = "true")
+            End If
+            If kv.ContainsKey("ActiveFrom") Then
+                Dim af As Date
+                If Date.TryParseExact(kv("ActiveFrom"), "yyyy-MM-dd",
+                    Nothing, Globalization.DateTimeStyles.None, af) Then dtpActiveFrom.Value = af
+            End If
+            dtpActiveFrom.Enabled = chkActiveFrom.Checked
+
+            _initialising = False
+            UpdateDynamicControls()   ' rebuild Parameters / TypeOfDay combos for the loaded Recurrence
+            _initialising = True
+
+            ' Restore Parameters combo (for non-weekly) or check boxes (for weekly)
+            If kv.ContainsKey("Recurrence") AndAlso kv("Recurrence") = "Weekly" Then
+                Dim selectedDays As String() = {}
+                If kv.ContainsKey("WeeklyDays") AndAlso kv("WeeklyDays") <> "" Then
+                    selectedDays = kv("WeeklyDays").Split("#"c)
+                End If
+                For i As Integer = 0 To clbWeekDays.Items.Count - 1
+                    Dim dayName As String = clbWeekDays.Items(i).ToString()
+                    Dim shouldCheck As Boolean = Array.IndexOf(selectedDays, dayName) >= 0
+                    clbWeekDays.SetItemChecked(i, shouldCheck)
+                Next i
+            Else
+                SetCombo(cmbParameters, kv, "Parameters")
+            End If
+
+            SetCombo(cmbTypeOfDay, kv, "TypeOfDay")
+
+            _initialising = False
+            UpdateTypeOfDayParams()   ' rebuild TypeOfDayParams options for loaded TypeOfDay
+            _initialising = True
+
+            SetCombo(cmbTypeOfDayParams, kv, "TypeOfDayParams")
+
+            ' Location of day
+            SetCombo(cmbLocBase, kv, "LocBase")
+            SetCombo(cmbLocSign, kv, "LocSign")
+            If kv.ContainsKey("LocOffset") Then
+                Dim lo As Integer
+                If Integer.TryParse(kv("LocOffset"), lo) Then nudLocOffset.Value = Math.Max(0, Math.Min(31, lo))
+            End If
+
+            ' Start date adjustments
+            SetCombo(cmbFriAdj, kv, "FriAdj")
+            SetCombo(cmbSatAdj, kv, "SatAdj")
+            SetCombo(cmbHolAdj, kv, "HolAdj")
+
+            ' Duration & end adjustments
+            If kv.ContainsKey("Duration") Then
+                Dim dur As Integer
+                If Integer.TryParse(kv("Duration"), dur) Then nudDuration.Value = Math.Max(0, Math.Min(9999, dur))
+            End If
+            SetCombo(cmbEndFriAdj, kv, "EndFriAdj")
+            SetCombo(cmbEndSatAdj, kv, "EndSatAdj")
+            SetCombo(cmbEndHolAdj, kv, "EndHolAdj")
+
+            ' Package validity
+            If kv.ContainsKey("ValidityMode") Then
+                Select Case kv("ValidityMode")
+                    Case "OneTimeOnly" : rbOneTime.Checked = True
+                    Case "ForXOccurrences" : rbForX.Checked = True
+                    Case "DateRange" : rbDateRange.Checked = True
+                    Case Else : rbContinuous.Checked = True
+                End Select
+            End If
+            If kv.ContainsKey("MaxOccurrences") Then
+                Dim mx As Integer
+                If Integer.TryParse(kv("MaxOccurrences"), mx) Then nudMaxOccurrences.Value = Math.Max(1, mx)
+            End If
+            If kv.ContainsKey("ValidFrom") Then
+                Dim vf As Date
+                If Date.TryParseExact(kv("ValidFrom"), "yyyy-MM-dd", Nothing,
+                    Globalization.DateTimeStyles.None, vf) Then dtpValidFrom.Value = vf
+            End If
+            If kv.ContainsKey("ValidTo") Then
+                Dim vt As Date
+                If Date.TryParseExact(kv("ValidTo"), "yyyy-MM-dd", Nothing,
+                    Globalization.DateTimeStyles.None, vt) Then dtpValidTo.Value = vt
+            End If
+            If kv.ContainsKey("ValidFromEqualsActiveFrom") Then
+                chkValidFromEqualsActiveFrom.Checked = (kv("ValidFromEqualsActiveFrom").ToLower() = "true")
+            End If
+            _initialising = False
+            UpdateValidityControls()
+            UpdateLocFormula()
+
+            MessageBox.Show("Settings loaded from:" & vbCrLf & dlg.FileName,
+                            "Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information)
+
+        Catch ex As Exception
+            _initialising = False
+            MessageBox.Show("Load error: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
+    ' ── Save/Load helpers ─────────────────────────────────────────────────────
+
+    ' Returns selected item text or empty string safely
+    Private Function SafeCombo(ByVal cmb As ComboBox) As String
+        If cmb Is Nothing Then Return ""
+        If cmb.SelectedItem Is Nothing Then Return ""
+        Return cmb.SelectedItem.ToString()
+    End Function
+
+    ' Sets a combo's selection from the kv dictionary; no-op if key missing or value not found
+    Private Sub SetCombo(ByVal cmb As ComboBox, ByVal kv As Dictionary(Of String, String), ByVal key As String)
+        If cmb Is Nothing Then Exit Sub
+        If Not kv.ContainsKey(key) Then Exit Sub
+        Dim val As String = kv(key)
+        For i As Integer = 0 To cmb.Items.Count - 1
+            If cmb.Items(i).ToString() = val Then
+                cmb.SelectedIndex = i
+                Exit Sub
+            End If
+        Next i
     End Sub
 
     ' -------------------------------------------------------------------------

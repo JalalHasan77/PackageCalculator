@@ -36,9 +36,6 @@
 
         'MsgBox(System.AppDomain.CurrentDomain.BaseDirectory)
 
-
-
-
         Try
             Dcom.Connection.Open()
         Catch ex As Exception
